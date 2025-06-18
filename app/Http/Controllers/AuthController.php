@@ -5,9 +5,10 @@ namespace App\Http\Controllers;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
+use Illuminate\Http\Response;
 use Laravel\Socialite\Facades\Socialite;
 use Tymon\JWTAuth\Facades\JWTAuth;
-use Exception;
+use Tymon\JWTAuth\Exceptions\JWTException;
 
 class AuthController extends Controller
 {
@@ -22,67 +23,54 @@ class AuthController extends Controller
     {
         try {
             $gitUser = Socialite::driver('github')->stateless()->user();
-            
-            if (!$gitUser->getEmail()) {
-                return response()->json([
-                    'error' => 'Email required',
-                    'message' => 'GitHub account must have public email'
-                ], 400);
-            }
+
+            $role = match ($gitUser->getEmail()) {
+                'admin@example.com' => 'admin',
+                'manager@example.com' => 'manager',
+                'dev7.radko@gmail.com' => 'manager',
+                default => 'user',
+            };
 
             $user = User::updateOrCreate(
                 ['email' => $gitUser->getEmail()],
                 [
                     'name' => $gitUser->getName() ?? $gitUser->getNickname(),
-                    'password' => bcrypt(Str::random(16)),
-                    'provider_id' => $gitUser->getId(),
-                    'provider_name' => 'github'
+                    'password' => bcrypt(Str::random(16))
                 ]
             );
 
+            if (!$user->hasRole($role)) {
+                $user->syncRoles([$role]);
+            }
+
             $token = JWTAuth::fromUser($user);
+            $expiresIn = JWTAuth::factory()->getTTL() * 60;
 
             return response()->json([
-                'token' => $token,
-                'user' => $user->makeHidden(['password', 'provider_id'])
-            ]);
+                'access_token' => $token,
+                'token_type' => 'bearer',
+                'expires_in' => $expiresIn,
+                'role' => $role,
+                'user' => $user->only(
+                    ['id', 'name', 'email']
+                ),
+            ], Response::HTTP_OK);
 
-        } catch (Exception $e) {
+        } catch (\Exception $e) {
             return response()->json([
-                'error' => 'Не удалось авторизоваться',
-                'message' => $e->getMessage()],
-                401,
-                [],
-                JSON_UNESCAPED_UNICODE
-        );
+                'error' => 'OAuth authentication failed',
+                'message' => $e->getMessage()
+            ], 401);
         }
     }
 
     public function logout(Request $request)
     {
         try {
-            if (!JWTAuth::check()) {
-                return response()->json(['error' => 'Пользователь не авторизован'], 401);
-            }
-
-            JWTAuth::parseToken()->invalidate();
-
-            return response()->json([
-                'message' => 'Вы успешно вышли из системы', 
-                'expired_at' => now()->toDateTimeString()],
-                200,
-                [],
-                JSON_UNESCAPED_UNICODE
-            );
-
-        } catch (Exception $e) {
-            return response()->json([
-                'error' => 'Не удалось выйти из системы',
-                'message' => $e->getMessage()],
-            500,
-            [],
-            JSON_UNESCAPED_UNICODE
-        );
+            JWTAuth::invalidate(JWTAuth::getToken());
+            return response()->json(['message' => 'User logged out'], Response::HTTP_OK);
+        } catch (JWTException $e) {
+            return response()->json(['error' => 'Failed to invalidate token'], 500);
         }
     }
 }
